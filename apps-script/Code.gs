@@ -241,6 +241,12 @@ function admin_() {
   return u;
 }
 
+/** Dalam mod peribadi (lihat_semua = TIDAK), hanya pemilik rekod boleh ubah rekod itu. */
+function pemilik_(me, emel) {
+  if ((settings_().lihat_semua || 'YA').toUpperCase() === 'YA') return;
+  if (String(emel || '').toLowerCase() !== me.email) throw new Error('Rekod ini bukan milik anda.');
+}
+
 function settings_() {
   var v = ss_().getSheetByName('Tetapan').getDataRange().getValues();
   var o = {};
@@ -291,13 +297,14 @@ function apiInit() {
   var lihatSemua = (s.lihat_semua || 'YA').toUpperCase() === 'YA';
   var rekod = readTable_('Rekod', H_REKOD);
   var log = readTable_('LogBorang', H_LOG);
-  if (!lihatSemua && !me.admin) {
+  if (!lihatSemua) { // mod peribadi: setiap orang (termasuk admin) nampak rekod sendiri sahaja
     rekod = rekod.filter(function (r) { return r.EmelClaimant === me.email; });
     log = log.filter(function (r) { return r.EmelClaimant === me.email; });
   }
   return {
     me: me,
-    users: users_(),
+    users: lihatSemua ? users_() : [me],
+    allUsers: me.admin ? users_() : [me],
     entiti: ENTITI,
     kategori: (s.kategori || KATEGORI_LALAI.join(',')).split(',').map(function (x) { return x.trim(); }).filter(String),
     kadar: Number(s.kadar_km || 0.65),
@@ -325,6 +332,7 @@ function apiSaveRecord(r, file) {
     var users = users_();
     var claimant = users.filter(function (u) { return u.email === String(r.EmelClaimant || me.email).toLowerCase(); })[0];
     if (!claimant) throw new Error('Claimant tidak sah.');
+    pemilik_(me, claimant.email);
     var e = entiti_(r.Entiti);
     var jenis = r.Jenis === 'Perbatuan' ? 'Perbatuan' : 'Resit';
     if (!/^\d{4}-\d{2}-\d{2}$/.test(r.Tarikh || '')) throw new Error('Tarikh tidak sah.');
@@ -336,6 +344,7 @@ function apiSaveRecord(r, file) {
       existing = {};
       var vals = sh.getRange(row, 1, 1, H_REKOD.length).getValues()[0];
       H_REKOD.forEach(function (h, j) { existing[h] = str_(vals[j]); });
+      pemilik_(me, existing.EmelClaimant);
       if (existing.Status !== STATUS.BELUM && !r._bukaKunci)
         throw new Error('Rekod ini sudah "' + existing.Status + '" dan dikunci.');
     }
@@ -396,7 +405,7 @@ function apiSaveRecord(r, file) {
 }
 
 function apiDeleteRecord(id) {
-  auth_();
+  var me = auth_();
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
@@ -404,6 +413,7 @@ function apiDeleteRecord(id) {
     var row = findRow_(sh, id);
     if (row < 0) throw new Error('Rekod tidak dijumpai.');
     var vals = sh.getRange(row, 1, 1, H_REKOD.length).getValues()[0];
+    pemilik_(me, vals[H_REKOD.indexOf('EmelClaimant')]);
     if (str_(vals[H_REKOD.indexOf('Status')]) !== STATUS.BELUM) throw new Error('Hanya rekod "Belum claim" boleh dipadam.');
     var fid = str_(vals[H_REKOD.indexOf('ResitFileId')]);
     if (fid) { try { DriveApp.getFileById(fid).setTrashed(true); } catch (err) {} } // Trash: boleh pulih 30 hari
@@ -416,7 +426,7 @@ function apiDeleteRecord(id) {
 
 /** Tukar status beberapa rekod. status: 'Dibayar' | 'Dah claim' | 'Belum claim' */
 function apiSetStatus(ids, status, tarikh) {
-  auth_();
+  var me = auth_();
   if ([STATUS.BELUM, STATUS.DAH, STATUS.BAYAR].indexOf(status) < 0) throw new Error('Status tidak sah.');
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
@@ -427,6 +437,7 @@ function apiSetStatus(ids, status, tarikh) {
     ids.forEach(function (id) {
       var row = findRow_(sh, id);
       if (row < 0) return;
+      pemilik_(me, sh.getRange(row, H_REKOD.indexOf('EmelClaimant') + 1).getValue());
       sh.getRange(row, cS).setValue(status);
       if (status === STATUS.BAYAR) sh.getRange(row, cB).setValue(tarikh || today_());
       if (status === STATUS.DAH) sh.getRange(row, cB).setValue('');
@@ -444,7 +455,7 @@ function apiGetReceipt(fileId) {
   var me = auth_();
   var lihatSemua = (settings_().lihat_semua || 'YA').toUpperCase() === 'YA';
   var ok = readTable_('Rekod', H_REKOD).some(function (r) {
-    return r.ResitFileId && r.ResitFileId === String(fileId) && (lihatSemua || me.admin || r.EmelClaimant === me.email);
+    return r.ResitFileId && r.ResitFileId === String(fileId) && (lihatSemua || r.EmelClaimant === me.email);
   });
   if (!ok) throw new Error('Resit tidak dijumpai.');
   var f = DriveApp.getFileById(fileId);
@@ -475,6 +486,7 @@ function apiSaveClaim(meta, pdfBase64) {
     var e = entiti_(meta.entiti);
     var u = users_().filter(function (x) { return x.email === String(meta.emelClaimant).toLowerCase(); })[0];
     if (!u) throw new Error('Claimant tidak sah.');
+    pemilik_(me, u.email);
     var sh = ss_().getSheetByName('Rekod');
     var cS = H_REKOD.indexOf('Status') + 1, cR = H_REKOD.indexOf('NoRujukan') + 1,
         cH = H_REKOD.indexOf('TarikhHantar') + 1, cU = H_REKOD.indexOf('Dikemaskini') + 1;
@@ -517,7 +529,7 @@ function apiExportCsv(filters) {
     if (filters.hingga && r.Tarikh > filters.hingga) return false;
     if (filters.entiti && r.Entiti !== filters.entiti) return false;
     if (filters.emelClaimant && r.EmelClaimant !== filters.emelClaimant) return false;
-    if ((s.lihat_semua || 'YA').toUpperCase() !== 'YA' && !me.admin && r.EmelClaimant !== me.email) return false;
+    if ((s.lihat_semua || 'YA').toUpperCase() !== 'YA' && r.EmelClaimant !== me.email) return false;
     return true;
   });
   var cols = ['Tarikh', 'Claimant', 'Entiti', 'Jenis', 'Kategori', 'Butiran', 'NoResit', 'Projek', 'Dari', 'Ke', 'KmSehala',

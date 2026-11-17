@@ -228,7 +228,7 @@ function catFace(variant, mood) {
   return s;
 }
 function catFor(u, mood) {
-  var i = S.d ? S.d.users.findIndex(function (x) { return x.email === (u && u.email); }) : 0;
+  var i = S.d ? (S.d.allUsers || S.d.users).findIndex(function (x) { return x.email === (u && u.email); }) : 0;
   return catSvg(['putih', 'calico', 'kelabu'][Math.max(i, 0) % 3], mood);
 }
 
@@ -1086,7 +1086,7 @@ function renderTetapan() {
     '<label class="row" style="color:var(--ink);font-size:15px"><input type="checkbox" class="check"' + (store('bunyi') !== '0' ? ' checked' : '') + ' onchange="setPref(\'bunyi\',this.checked)"> Bunyi meow sekali-sekala</label>' +
     '<div class="small muted">Tekan kucing untuk dapat hati &#10084;</div></div>';
 
-  h += '<div class="card"><h2>Pengguna</h2>' + d.users.map(function (u) {
+  h += '<div class="card"><h2>Pengguna</h2>' + (d.allUsers || d.users).map(function (u) {
     return '<div class="item midcat" style="cursor:default">' + catFor(u, 'dot') + '<div class="grow"><div class="t">' + esc(u.nama) + ' <span class="muted small">(' + esc(u.kod) + ')</span></div><div class="small muted">' + esc(u.email) + '</div></div>' + (u.admin ? '<span class="pill s-dah">admin</span>' : '') + '</div>';
   }).join('');
   if (adm) h += '<h3>Tambah pengguna (cth Amalina)</h3><input id="nuEmail" type="email" placeholder="Emel Google" autocomplete="off">' +
@@ -1195,7 +1195,7 @@ var WK = { x: -90, dir: 1, state: 'walk', until: 0, last: 0, pawAt: 0, el: null 
 function walkerOn() { return store('kucing') !== '0'; }
 function initWalker() {
   var el = $('walker'); WK.el = el;
-  var i = S.d ? Math.max(S.d.users.findIndex(function (x) { return x.email === S.d.me.email; }), 0) : 0;
+  var i = S.d ? Math.max((S.d.allUsers || S.d.users).findIndex(function (x) { return x.email === S.d.me.email; }), 0) : 0;
   el.innerHTML = '<div class="say" id="say"></div>' + walkCatSvg(['putih', 'calico', 'kelabu'][i % 3], 'dot');
   el.querySelector('svg').addEventListener('click', function (ev) { ev.stopPropagation(); unlockAudio(); setTimeout(petCat, 30); });
   el.classList.toggle('off', !walkerOn());

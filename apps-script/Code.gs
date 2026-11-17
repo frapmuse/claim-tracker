@@ -117,7 +117,8 @@ function doPost(e) {
     var fns = {
       apiInit: apiInit, apiSaveRecord: apiSaveRecord, apiDeleteRecord: apiDeleteRecord, apiSetStatus: apiSetStatus,
       apiGetReceipt: apiGetReceipt, apiNextRef: apiNextRef, apiSaveClaim: apiSaveClaim, apiExportCsv: apiExportCsv,
-      apiAddUser: apiAddUser, apiSetSetting: apiSetSetting, apiUpdateMe: apiUpdateMe, apiAset: apiAset, apiLogout: apiLogout
+      apiAddUser: apiAddUser, apiSetSetting: apiSetSetting, apiUpdateMe: apiUpdateMe, apiAset: apiAset, apiLogout: apiLogout,
+      apiScanResit: apiScanResit
     };
     var args = Array.isArray(req.args) ? req.args : [];
     if (req.fn === 'apiLogin') {
@@ -595,3 +596,130 @@ function apiUpdateMe(nama, namaPenuh, jawatan) {
 }
 
 
+/* ------------------------------------------------------------------ */
+/* Baca resit (OCR Google Drive)                                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Baca gambar/PDF resit dengan OCR Google Drive, kemudian cuba kenal pasti merchant, jumlah, tarikh dan no. resit.
+ * Hasilnya hanya CADANGAN; pengguna semak dan betulkan sebelum simpan.
+ * file: {mimeType, data(base64)}
+ */
+function apiScanResit(file) {
+  auth_();
+  if (!file || !file.data) throw new Error('Tiada fail resit.');
+  if (file.data.length > 14e6) throw new Error('Fail terlalu besar untuk dibaca.');
+  var mime = file.mimeType === 'application/pdf' ? 'application/pdf' : (file.mimeType || 'image/jpeg');
+  var blob = Utilities.newBlob(Utilities.base64Decode(file.data), mime, 'resit-ocr');
+  var meta = { name: 'tmp-ocr-' + Date.now(), mimeType: 'application/vnd.google-apps.document' };
+  var rootId = PropertiesService.getScriptProperties().getProperty('ROOT_ID');
+  if (rootId) meta.parents = [rootId];
+  var doc = Drive.Files.create(meta, blob, { ocrLanguage: 'en', fields: 'id' });
+  var text = '';
+  try {
+    var res = UrlFetchApp.fetch('https://www.googleapis.com/drive/v3/files/' + doc.id + '/export?mimeType=text%2Fplain', {
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }, muteHttpExceptions: true });
+    if (res.getResponseCode() !== 200) throw new Error('OCR gagal (' + res.getResponseCode() + ').');
+    text = res.getContentText();
+  } finally {
+    try { Drive.Files.remove(doc.id); } catch (e) { try { DriveApp.getFileById(doc.id).setTrashed(true); } catch (e2) {} }
+  }
+  var out = parseResit_(text, today_());
+  out.teks = String(text).slice(0, 3000);
+  return out;
+}
+
+/** Tafsir teks OCR resit. Pulangkan {merchant, amaun, tarikh(yyyy-MM-dd), noResit}; medan kosong jika tidak pasti. */
+function parseResit_(text, today) {
+  var lines = String(text || '').replace(/\r/g, '').split('\n')
+    .map(function (l) { return l.replace(/[ \t]+/g, ' ').replace(/\s{2,}/g, ' ').trim(); })
+    .filter(function (l) { return l.length; });
+  var MONEY = /(?:RM\s*)?(\d{1,3}(?:,\d{3})+|\d+)[.,](\d{2})(?!\d)/gi;
+  function monies(l) {
+    var out = [], m; MONEY.lastIndex = 0;
+    while ((m = MONEY.exec(l))) out.push(Number(m[1].replace(/,/g, '') + '.' + m[2]));
+    return out;
+  }
+  function onlyMoney(l) { return /^(RM\s*)?[\d,]+[.,]\d{2}$/i.test(l.replace(/\s+/g, ' ').trim()) || /^RM\s*$/i.test(l); }
+  var EXCL = /change|baki|\bcash\b|tunai|tender|bayaran tunai|rounding|pembundaran|discount|diskaun|saving/i;
+  var SUB = /sub\s*-?\s*total|total\s*(items?|qty|quantity|disc|tax|sst|gst|saving|point)/i;
+  var P1 = /net\s*total|grand\s*total|total\s*amount|amount\s*due|jumlah\s*besar|jumlah\s*bersih|total\s*payable|total\s*\(?rm\)?|rounded\s*total|total\s*incl|total\s*sales|amaun\s*perlu\s*dibayar/i;
+  var P2 = /\btotal\b|\bjumlah\b|\bamount\b/i;
+
+  function amountAt(i) {
+    var v = monies(lines[i]);
+    if (v.length) return v[v.length - 1];
+    for (var k = i + 1; k < Math.min(lines.length, i + 4); k++) {
+      if (P2.test(lines[k]) || EXCL.test(lines[k])) break;
+      var w = monies(lines[k]);
+      if (w.length && onlyMoney(lines[k])) return w[w.length - 1];
+      if (!onlyMoney(lines[k])) break;
+    }
+    return null;
+  }
+  var amaun = null;
+  [P1, P2].some(function (re) {
+    for (var i = 0; i < lines.length; i++) {
+      var l = lines[i];
+      if (!re.test(l) || SUB.test(l) || EXCL.test(l)) continue;
+      var a = amountAt(i);
+      if (a !== null && a > 0) { amaun = a; return true; }
+    }
+    return false;
+  });
+  if (amaun === null) {
+    var best = 0;
+    lines.forEach(function (l) { if (!EXCL.test(l) && !SUB.test(l)) monies(l).forEach(function (v) { if (v > best && v < 100000) best = v; }); });
+    if (best > 0) amaun = best;
+  }
+
+  // tarikh
+  var MON = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, mei: 5, jun: 6, jul: 7, aug: 8, ogo: 8, sep: 9, oct: 10, okt: 10, nov: 11, dec: 12, dis: 12 };
+  var tarikh = '';
+  var t0 = new Date(today + 'T00:00:00Z').getTime();
+  function ok(y, m, d) {
+    if (y < 100) y += 2000;
+    if (!(m >= 1 && m <= 12 && d >= 1 && d <= 31 && y >= 2000)) return '';
+    var t = Date.UTC(y, m - 1, d);
+    if (t > t0 + 2 * 864e5 || t < t0 - 730 * 864e5) return '';
+    return y + '-' + ('0' + m).slice(-2) + '-' + ('0' + d).slice(-2);
+  }
+  for (var i = 0; i < lines.length && !tarikh; i++) {
+    var l = lines[i], m;
+    if ((m = /(20\d{2})[-\/.](\d{1,2})[-\/.](\d{1,2})/.exec(l))) tarikh = ok(+m[1], +m[2], +m[3]);
+    if (!tarikh && (m = /\b(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{2,4})\b/.exec(l))) tarikh = ok(+m[3], +m[2], +m[1]);
+    if (!tarikh && (m = /\b(\d{1,2})[\s\-\/.]*([A-Za-z]{3})[A-Za-z]*[\s\-\/.,]*(\d{2,4})\b/.exec(l)) && MON[m[2].toLowerCase()]) tarikh = ok(+m[3], MON[m[2].toLowerCase()], +m[1]);
+  }
+
+  // no. resit
+  var noResit = '';
+  var NOKEY = /(receipt|resit|invoice|inv|bill|doc(?:ument)?|order|check|cheque|trans(?:action)?|ref|slip)\s*(no\.?|num(?:ber)?|#)|no\.?\s*(resit|invois|bil)|^(r(?:ct|cpt)?|no|bill)\s*[:#]/i;
+  for (var j = 0; j < lines.length && !noResit; j++) {
+    if (!NOKEY.test(lines[j])) continue;
+    var after = lines[j].split(/[:#]/).slice(1).join(':').trim();
+    var mm = /[A-Z0-9][A-Z0-9\-\/]{2,}/i.exec(after);
+    if (mm && /\d/.test(mm[0])) noResit = mm[0];
+  }
+
+  // merchant: baris bermakna pertama di bahagian atas
+  var SKIP = /receipt|resit|invoice|invois|tax|cukai|welcome|selamat|terima kasih|thank|tel\b|tel:|phone|fax|whatsapp|gst|sst|reg\b|reg\.|co\.?\s*no|www|http|@|^\W+$|cashier|table|date|tarikh|time|masa/i;
+  var ADDR = /\bjalan\b|\bjln\b|\blot\b|\btaman\b|\bseksyen\b|\bsection\b|\bno\.?\s*\d|\b\d{5}\b|floor|aras|kuala lumpur|selangor|w\.p\./i;
+  var LEGAL = /sdn\.?\s*bhd|bhd\b|enterprise|\bplt\b|holdings|trading|\(\d+.*\)/i;
+  function letters(l) { return (l.match(/[A-Za-z]/g) || []).length; }
+  function digits(l) { return (l.match(/\d/g) || []).length; }
+  var merchant = '', top = lines.slice(0, 8);
+  for (var q = 0; q < top.length; q++) {
+    var c = top[q];
+    if (letters(c) < 3 || digits(c) > letters(c) * 0.4 || SKIP.test(c) || ADDR.test(c) || monies(c).length) continue;
+    merchant = c;
+    var nx = top[q + 1];
+    if (!LEGAL.test(c) && nx && !digits(nx) && letters(nx) >= 3 && nx.split(' ').length <= 3 && c.split(' ').length <= 4 &&
+        !LEGAL.test(nx) && !SKIP.test(nx) && !ADDR.test(nx)) merchant += ' ' + nx;
+    break;
+  }
+  if (merchant && merchant === merchant.toUpperCase())
+    merchant = merchant.toLowerCase().replace(/(^|[\s(\-\/])([a-z])/g, function (a, b, ch) { return b + ch.toUpperCase(); });
+  merchant = merchant.replace(/\s+/g, ' ').slice(0, 120);
+
+  return { merchant: merchant, amaun: amaun === null ? '' : amaun.toFixed(2), tarikh: tarikh, noResit: noResit };
+}

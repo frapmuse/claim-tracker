@@ -454,8 +454,13 @@ function renderForm() {
   }).join('') + '</div>';
 
   if (r.Jenis === 'Resit') {
-    h += '<label>Amaun (RM)</label><input class="amount" id="fAmaun" inputmode="decimal" placeholder="0.00" value="' + esc(r.Amaun) + '"' + dis + ' oninput="fv(\'Amaun\',this.value.replace(\',\',\'.\'))">';
     h += '<label>Resit</label>' + photoBox(r, lock, 'Ambil gambar / pilih fail');
+    if (r._scan) h += '<div class="note" style="margin-top:8px">' + ({
+      baca: '&#128049; Kucing tengah baca resit...',
+      ok: '&#10024; Dah isi ' + esc((r._scanIsi || []).join(', ')) + ' dari resit. <b>Sila semak</b> dan betulkan jika salah, kemudian pilih kategori.',
+      tiada: 'Resit tak dapat dibaca dengan jelas. Sila isi sendiri ya.',
+      gagal: 'Tak dapat baca resit sekarang. Sila isi sendiri ya.' })[r._scan] + '</div>';
+    h += '<label>Amaun (RM)</label><input class="amount" id="fAmaun" inputmode="decimal" placeholder="0.00" value="' + esc(r.Amaun) + '"' + dis + ' oninput="fv(\'Amaun\',this.value.replace(\',\',\'.\'))">';
   } else {
     var pl = places();
     h += '<label>Tujuan / mesyuarat (Perkara)</label><input value="' + esc(r.Butiran) + '"' + dis + ' oninput="fv(\'Butiran\',this.value)" placeholder="cth Meeting Follow Up Perwira">';
@@ -478,7 +483,7 @@ function renderForm() {
       '<div class="grow"><label>No. resit</label><input value="' + esc(r.NoResit) + '"' + dis + ' oninput="fv(\'NoResit\',this.value)" placeholder="cth POS1474864"></div></div>';
     h += '<label>Perkara / kedai</label><input value="' + esc(r.Butiran) + '"' + dis + ' oninput="fv(\'Butiran\',this.value)" placeholder="cth Restoran Mak Kimbong, Seksyen 4 Bangi">';
   }
-  h += '<div class="row"><div class="grow"><label>Tarikh</label><input type="date" value="' + esc(r.Tarikh) + '"' + dis + ' onchange="fv(\'Tarikh\',this.value)"></div>';
+  h += '<div class="row"><div class="grow"><label>Tarikh</label><input type="date" value="' + esc(r.Tarikh) + '"' + dis + ' onchange="fv(\'Tarikh\',this.value);F._tarikhUbah=true"></div>';
   if (d.users.length > 1) h += '<div class="grow"><label>Claimant</label><select' + dis + ' onchange="fv(\'EmelClaimant\',this.value)">' + d.users.map(function (u) {
     return '<option value="' + esc(u.email) + '"' + (r.EmelClaimant === u.email ? ' selected' : '') + '>' + esc(u.nama) + '</option>'; }).join('') + '</select></div>';
   h += '</div>';
@@ -518,15 +523,37 @@ function pickFile(inp) {
   if (!file) return;
   if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name)) {
     if (file.size > 15 * 1024 * 1024) return toast('PDF terlalu besar (maks 15MB).');
-    readB64(file).then(function (b64) { F._file = { name: file.name, mimeType: 'application/pdf', data: b64 }; F._preview = null; renderForm(); });
+    readB64(file).then(function (b64) { F._file = { name: file.name, mimeType: 'application/pdf', data: b64 }; F._preview = null; renderForm(); scanResit(); });
     return;
   }
   busy(true, 'Memproses gambar...');
   compressImage(file, 1800, 0.82).then(function (out) {
     F._file = { name: (file.name || 'resit').replace(/\.[^.]+$/, '') + '.jpg', mimeType: 'image/jpeg', data: out.split(',')[1] };
-    F._preview = out; busy(false); renderForm();
+    F._preview = out; busy(false); renderForm(); scanResit();
   }).catch(function () {
-    readB64(file).then(function (b64) { F._file = { name: file.name, mimeType: file.type || 'image/jpeg', data: b64 }; F._preview = null; busy(false); renderForm(); });
+    readB64(file).then(function (b64) { F._file = { name: file.name, mimeType: file.type || 'image/jpeg', data: b64 }; F._preview = null; busy(false); renderForm(); scanResit(); });
+  });
+}
+/* Baca resit automatik: isi cadangan merchant, amaun, tarikh, no. resit (pengguna semak sebelum simpan) */
+function scanResit() {
+  if (!F || F.Jenis !== 'Resit' || !F._file) return;
+  var f = F, file = F._file;
+  f._scan = 'baca'; renderForm();
+  catSay('Jap, saya baca resit ni...', 2500);
+  api('apiScanResit', { mimeType: file.mimeType, data: file.data }).then(function (r) {
+    if (F !== f || f._file !== file) return; // borang dah ditutup / fail ditukar
+    var isi = [];
+    if (r.amaun && !(Number(f.Amaun) > 0)) { f.Amaun = r.amaun; isi.push('amaun'); }
+    if (r.merchant && !f.Butiran) { f.Butiran = r.merchant; isi.push('kedai'); }
+    if (r.noResit && !f.NoResit) { f.NoResit = r.noResit; isi.push('no. resit'); }
+    if (r.tarikh && !f.ID && !f._tarikhUbah) { f.Tarikh = r.tarikh; isi.push('tarikh'); }
+    f._scan = isi.length ? 'ok' : 'tiada';
+    f._scanIsi = isi;
+    renderForm();
+    if (isi.length) { toast('Resit dibaca. Sila semak ' + isi.join(', ') + ' ya.', 3500); meowSound(1.2); }
+  }).catch(function (e) {
+    if (F !== f) return;
+    f._scan = 'gagal'; renderForm(); console.warn('scan', e);
   });
 }
 function readB64(file) {

@@ -338,6 +338,20 @@ function apiSaveRecord(r, file) {
     var jenis = r.Jenis === 'Perbatuan' ? 'Perbatuan' : 'Resit';
     if (!/^\d{4}-\d{2}-\d{2}$/.test(r.Tarikh || '')) throw new Error('Tarikh tidak sah.');
 
+    // Elak rekod double: hantaran semula borang yang sama (kunci sama) pulangkan rekod yang sudah disimpan.
+    var cache = CacheService.getScriptCache();
+    var kunci = !r.ID && /^[A-Za-z0-9_-]{8,64}$/.test(String(r.KunciHantar || '')) ? 'K_' + me.email + '_' + r.KunciHantar : '';
+    if (kunci) {
+      var dahId = cache.get(kunci);
+      var dahRow = dahId ? findRow_(sh, dahId) : -1;
+      if (dahRow > 0) {
+        var dah = {}, dv = sh.getRange(dahRow, 1, 1, H_REKOD.length).getValues()[0];
+        H_REKOD.forEach(function (h, j) { dah[h] = str_(dv[j]); });
+        dah._ulang = true;
+        return dah;
+      }
+    }
+
     var existing = null, row = -1;
     if (r.ID) {
       row = findRow_(sh, r.ID);
@@ -399,6 +413,7 @@ function apiSaveRecord(r, file) {
     var out = H_REKOD.map(function (h) { return o[h] === undefined ? '' : o[h]; });
     if (row > 0) sh.getRange(row, 1, 1, out.length).setValues([out]);
     else sh.appendRow(out);
+    if (kunci) cache.put(kunci, o.ID, 21600); // ingat 6 jam
     return o;
   } finally {
     lock.releaseLock();

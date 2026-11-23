@@ -430,10 +430,16 @@ function openForm(id) {
     EmelClaimant: d.me.email, Amaun: '', NoResit: '', Butiran: '', Projek: '', Dari: store('dari') || '', Ke: '', KmSehala: '', DuaHala: 'YA', Nota: ''
   };
   F._file = null; F._preview = null; F._locked = !!(r && r.Status !== 'Belum claim'); F._bukaKunci = false;
+  F._kunci = r ? '' : kunciBaru(); F._menyimpan = false; F._ralat = '';
   renderForm();
   $('sheetWrap').classList.add('open');
   $('sheet').scrollTop = 0;
   document.body.style.overflow = 'hidden';
+}
+function kunciBaru() {
+  var a = new Uint8Array(12);
+  try { crypto.getRandomValues(a); } catch (e) { for (var i = 0; i < a.length; i++) a[i] = Math.floor(Math.random() * 256); }
+  return Array.prototype.map.call(a, function (b) { return ('0' + b.toString(16)).slice(-2); }).join('');
 }
 function closeSheet() { $('sheetWrap').classList.remove('open'); document.body.style.overflow = ''; F = null; }
 function fv(k, v) { F[k] = v; }
@@ -492,7 +498,8 @@ function renderForm() {
   h += '<label>Nota dalaman (tidak keluar dalam borang)</label><textarea' + dis + ' oninput="fv(\'Nota\',this.value)">' + esc(r.Nota) + '</textarea>';
 
   h += '<div style="height:16px"></div>';
-  if (!lock) h += '<button class="primary block" onclick="saveForm()">' + (isNew ? 'Simpan' : 'Simpan perubahan') + '</button>';
+  if (r._ralat) h += '<div class="lock" id="fRalat">' + esc(r._ralat) + '</div><div style="height:10px"></div>';
+  if (!lock) h += '<button class="primary block" onclick="saveForm()">' + (r._ralat ? 'Cuba simpan semula' : isNew ? 'Simpan' : 'Simpan perubahan') + '</button>';
   if (r.ID) {
     h += '<div style="height:12px"></div>';
     if (r.Status === 'Dah claim') h += '<button class="block" onclick="markPaid([\'' + jsq(r.ID) + '\'])">Tanda Dibayar</button><div style="height:10px"></div>';
@@ -588,16 +595,34 @@ function saveForm() {
     if (!r.Dari || !r.Ke) return toast('Isi alamat Dari dan Ke.');
     if (!(Number(r.KmSehala) > 0)) return toast('Masukkan km sehala.');
   }
+  if (r._menyimpan) return; // elak tekan dua kali
   var payload = {};
   ['ID', 'Jenis', 'Tarikh', 'Entiti', 'Kategori', 'EmelClaimant', 'Amaun', 'NoResit', 'Butiran', 'Projek', 'Dari', 'Ke', 'KmSehala', 'DuaHala', 'Nota'].forEach(function (k) { payload[k] = r[k]; });
   payload._bukaKunci = !!r._bukaKunci;
+  if (!r.ID) payload.KunciHantar = r._kunci;
   store('entiti', r.Entiti); if (r.Jenis === 'Resit') store('kategori', r.Kategori); if (r.Dari) store('dari', r.Dari);
+  r._menyimpan = true;
   busy(true, r._file ? 'Memuat naik resit...' : 'Menyimpan...');
   api('apiSaveRecord', payload, r._file || null).then(function (saved) {
+    r._menyimpan = false;
+    var ulang = saved._ulang; delete saved._ulang;
     var i = S.d.rekod.findIndex(function (x) { return x.ID === saved.ID; });
     if (i >= 0) S.d.rekod[i] = saved; else S.d.rekod.push(saved);
-    busy(false); closeSheet(); renderAll(); toast('Disimpan ' + rm(saved.Amaun) + ' ✔'); catSay('Yay! Resit selamat~'); meowSound(1.15);
-  }).catch(fail);
+    busy(false); closeSheet(); renderAll();
+    toast(ulang ? 'Rekod ini memang dah disimpan tadi ✔ (tiada double)' : 'Disimpan ' + rm(saved.Amaun) + ' ✔', ulang ? 4000 : 2600);
+    catSay('Yay! Resit selamat~'); meowSound(1.15);
+  }).catch(function (e) {
+    r._menyimpan = false;
+    busy(false);
+    if (e && e.auth) return;
+    if (F !== r) return fail(e);
+    // Rangkaian putus: rekod MUNGKIN sudah masuk. Simpan semula selamat kerana kunci hantaran sama.
+    r._ralat = (e && e.message ? e.message + ' ' : '') + (r.ID ? 'Sila cuba lagi.' :
+      'Rekod mungkin sudah tersimpan. Tekan "Cuba simpan semula": app akan semak dan tidak akan buat rekod double.');
+    renderForm();
+    var el = $('fRalat'); if (el) el.scrollIntoView({ block: 'center' });
+    toast('Belum pasti disimpan. Sila semak mesej dalam borang.', 4000);
+  });
 }
 function delRecord(id) {
   if (!confirm('Padam rekod ini? Resit akan dipindah ke Trash Drive (boleh pulih dalam 30 hari).')) return;

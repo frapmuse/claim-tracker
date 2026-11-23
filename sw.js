@@ -1,5 +1,5 @@
 /* Service worker ringkas: simpan kulit app supaya cepat dibuka. Data sentiasa diambil dari pelayan. */
-var CACHE = 'ct-v1';
+var CACHE = 'ct-v2';
 var SHELL = ['./', 'index.html', 'config.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-180.png'];
 self.addEventListener('install', function (e) {
   e.waitUntil(caches.open(CACHE).then(function (c) { return c.addAll(SHELL); }).then(function () { return self.skipWaiting(); }));
